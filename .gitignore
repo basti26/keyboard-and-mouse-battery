@@ -1,0 +1,5 @@
+diagnostic.txt
+error.txt
+*.pdb
+obj/
+bin/
