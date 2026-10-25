@@ -23,6 +23,7 @@
 位置：%LOCALAPPDATA%\无线键鼠电量\logs
 最多约 3 MB（当前日志 1 MB，加两份历史文件），仅本机保存。
 鼠标没有数据时，还会记录接收器可用状态；右键菜单可查看该状态。
+鼠标暂无数据时每 2 秒检测光标位置，有移动就主动刷新；读到数据后停止检测。
 
 开发：BatteryTray.cs 为完整源码，build.ps1 使用系统 .NET Framework 编译器构建。
 诊断：运行 EXE --diagnose，在同目录生成 diagnostic.txt，不启动托盘。

@@ -80,6 +80,8 @@ internal sealed class BatteryContext : ApplicationContext
     private readonly NotifyIcon tray = new NotifyIcon();
     private readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
     private readonly System.Windows.Forms.Timer resumeTimer = new System.Windows.Forms.Timer();
+    private readonly System.Windows.Forms.Timer activityTimer = new System.Windows.Forms.Timer();
+    private Point lastCursor;
     private readonly ContextMenuStrip menu = new ContextMenuStrip();
     private readonly ToolStripMenuItem mouseItem = new ToolStripMenuItem("鼠标（左红）：正在读取…");
     private readonly ToolStripMenuItem keyboardItem = new ToolStripMenuItem("键盘（右蓝）：正在读取…");
@@ -124,6 +126,15 @@ internal sealed class BatteryContext : ApplicationContext
         timer.Start();
         resumeTimer.Interval = 3000;
         resumeTimer.Tick += delegate { resumeTimer.Stop(); Refresh("resume"); };
+        activityTimer.Interval = 2000;
+        activityTimer.Tick += delegate {
+            if (closing || Interlocked.CompareExchange(ref busy, 0, 0) != 0) return;
+            Point cursor;
+            if (GetCursorPos(out cursor) && cursor != lastCursor) {
+                lastCursor = cursor;
+                Refresh("cursor-moved-after-missing");
+            }
+        };
         SystemEvents.PowerModeChanged += OnPower;
         Refresh("startup");
     }
@@ -154,6 +165,8 @@ internal sealed class BatteryContext : ApplicationContext
             AppLog.Write("refresh result mouse=" + Format(m) + " keyboard=" + Format(k) + " source=" + Hid.MouseSource + " elapsed_ms=" + watch.ElapsedMilliseconds);
             Post(delegate {
                 mouse = m; keyboard = k;
+                if (m.HasValue) activityTimer.Stop();
+                else if (!activityTimer.Enabled && GetCursorPos(out lastCursor)) activityTimer.Start();
                 mouseItem.Text = "鼠标 VXE R1SE+（左红）：" + Format(m);
                 keyboardItem.Text = "键盘 珂芝 K75（右蓝）：" + Format(k);
                 sourceItem.Text = "鼠标来源：" + Hid.MouseSource;
@@ -214,13 +227,14 @@ internal sealed class BatteryContext : ApplicationContext
         AppLog.Write("exit requested");
         closing = true;
         SystemEvents.PowerModeChanged -= OnPower;
-        timer.Dispose(); resumeTimer.Dispose();
+        timer.Dispose(); resumeTimer.Dispose(); activityTimer.Dispose();
         tray.Visible = false; tray.Dispose(); menu.Dispose();
         if (drawing != null) drawing.Dispose();
         dispatcher.Dispose();
         base.ExitThreadCore();
     }
     [DllImport("user32.dll")] private static extern bool DestroyIcon(IntPtr icon);
+    [DllImport("user32.dll")] private static extern bool GetCursorPos(out Point point);
 }
 
 internal struct BatterySnapshot
