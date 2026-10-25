@@ -88,6 +88,7 @@ internal sealed class BatteryContext : ApplicationContext
     private readonly ToolStripMenuItem sourceItem = new ToolStripMenuItem("鼠标来源：正在读取…");
     private readonly ToolStripMenuItem startupItem = new ToolStripMenuItem("开机启动");
     private readonly bool[] warned = new bool[2];
+    private readonly BatteryHistory mouseHistory = new BatteryHistory();
     private Icon drawing;
     private int? mouse, keyboard;
     private int busy;
@@ -164,16 +165,18 @@ internal sealed class BatteryContext : ApplicationContext
             finally { Interlocked.Exchange(ref busy, 0); }
             AppLog.Write("refresh result mouse=" + Format(m) + " keyboard=" + Format(k) + " source=" + Hid.MouseSource + " elapsed_ms=" + watch.ElapsedMilliseconds);
             Post(delegate {
-                mouse = m; keyboard = k;
+                mouseHistory.Observe(m, DateTimeOffset.Now);
+                mouse = mouseHistory.Value; keyboard = k;
                 if (m.HasValue) activityTimer.Stop();
                 else if (!activityTimer.Enabled && GetCursorPos(out lastCursor)) activityTimer.Start();
-                mouseItem.Text = "鼠标 VXE R1SE+（左红）：" + Format(m);
+                mouseItem.Text = "鼠标 VXE R1SE+（左红）：" + Format(mouse);
+                if (mouseHistory.IsStale) mouseItem.Text += "（上次读取 " + mouseHistory.UpdatedAt.Value.ToString("MM-dd HH:mm:ss") + "）";
                 keyboardItem.Text = "键盘 珂芝 K75（右蓝）：" + Format(k);
                 sourceItem.Text = "鼠标来源：" + Hid.MouseSource;
                 if (!m.HasValue) sourceItem.Text += "（" + Hid.MouseLinkStatus + "）";
-                tray.Text = "鼠标(左红) " + Format(m) + " / 键盘(右蓝) " + Format(k);
+                tray.Text = "鼠标(左红) " + Format(mouse) + (mouseHistory.IsStale ? "（上次 " + mouseHistory.UpdatedAt.Value.ToString("HH:mm") + "）" : "") + " / 键盘(右蓝) " + Format(k);
                 PaintIcon();
-                AppLog.Write("display mouse=" + Format(m) + " keyboard=" + Format(k));
+                AppLog.Write("display mouse=" + Format(mouse) + " cached=" + mouseHistory.IsStale + " last_success=" + mouseHistory.UpdatedAt + " keyboard=" + Format(k));
                 Low(m, 0, "鼠标 VXE R1SE+"); Low(k, 1, "键盘 珂芝 K75");
             });
         });
@@ -235,6 +238,22 @@ internal sealed class BatteryContext : ApplicationContext
     }
     [DllImport("user32.dll")] private static extern bool DestroyIcon(IntPtr icon);
     [DllImport("user32.dll")] private static extern bool GetCursorPos(out Point point);
+}
+
+internal sealed class BatteryHistory
+{
+    internal int? Value { get; private set; }
+    internal DateTimeOffset? UpdatedAt { get; private set; }
+    internal bool IsStale { get; private set; }
+    internal void Observe(int? reading, DateTimeOffset now)
+    {
+        if (reading.HasValue) {
+            Value = reading;
+            UpdatedAt = now;
+            IsStale = false;
+        }
+        else IsStale = Value.HasValue;
+    }
 }
 
 internal struct BatterySnapshot
