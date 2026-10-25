@@ -157,6 +157,7 @@ internal sealed class BatteryContext : ApplicationContext
                 mouseItem.Text = "鼠标 VXE R1SE+（左红）：" + Format(m);
                 keyboardItem.Text = "键盘 珂芝 K75（右蓝）：" + Format(k);
                 sourceItem.Text = "鼠标来源：" + Hid.MouseSource;
+                if (!m.HasValue) sourceItem.Text += "（" + Hid.MouseLinkStatus + "）";
                 tray.Text = "鼠标(左红) " + Format(m) + " / 键盘(右蓝) " + Format(k);
                 PaintIcon();
                 AppLog.Write("display mouse=" + Format(m) + " keyboard=" + Format(k));
@@ -253,8 +254,10 @@ internal static class Hid
 {
     private sealed class Device { internal string Path; internal ushort Vid, Pid; internal Caps Caps; }
     internal static string MouseSource = "未连接";
+    internal static string MouseLinkStatus = "连接状态未知";
     internal static int? ReadMouse()
     {
+        MouseLinkStatus = "连接状态未知";
         List<Device> candidates = new List<Device>();
         foreach (Device d in Enumerate())
         {
@@ -281,8 +284,23 @@ internal static class Hid
                     int sum = 0;
                     if (count == 17) for (int i = 0; i < 17; i++) sum += reply[i];
                     AppLog.Write("mouse reply attempt=" + (attempt + 1) + " count=" + count + " checksum=" + (sum & 255).ToString("X2") + " bytes=" + (count > 0 ? BitConverter.ToString(reply, 0, count) : "none"));
-                    if (count == 17 && reply[0] == 8 && reply[1] == 4 && reply[6] <= 100 && (sum & 255) == 0x55) return reply[6];
+                    int percent;
+                    if (MouseProtocol.TryValue(reply, count, 4, 100, out percent)) return percent;
                 }
+            }
+            // Read-only receiver status; distinguishes unavailable telemetry from an IO timeout.
+            using (SafeFileHandle h = Open(d.Path, true))
+            {
+                if (h.IsInvalid) continue;
+                byte[] request = new byte[17]; request[0] = 8; request[1] = 3; request[16] = 74;
+                if (Transfer(h, request, false, 500) != 17) continue;
+                byte[] reply = new byte[d.Caps.InputReportByteLength];
+                int count = Transfer(h, reply, true, 700), available;
+                if (MouseProtocol.TryValue(reply, count, 3, 1, out available)) {
+                    MouseLinkStatus = available == 1 ? "接收器报告鼠标可用" : "接收器报告鼠标不可用";
+                    AppLog.Write("mouse receiver availability=" + available + " bytes=" + BitConverter.ToString(reply, 0, count));
+                }
+                else AppLog.Write("mouse receiver status invalid count=" + count + " bytes=" + (count > 0 ? BitConverter.ToString(reply, 0, count) : "none"));
             }
         }
         return null;
@@ -409,6 +427,20 @@ internal static class Hid
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr CreateEvent(IntPtr security, bool manual, bool initial, string name);
     [DllImport("kernel32.dll")] private static extern uint WaitForSingleObject(IntPtr h, uint timeout);
     [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr h);
+}
+
+internal static class MouseProtocol
+{
+    internal static bool TryValue(byte[] reply, int count, byte command, int maximum, out int value)
+    {
+        value = 0;
+        if (reply == null || count != 17 || reply.Length < count || reply[0] != 8 || reply[1] != command) return false;
+        int sum = 0;
+        for (int i = 0; i < count; i++) sum += reply[i];
+        if ((sum & 255) != 0x55 || reply[6] > maximum) return false;
+        value = reply[6];
+        return true;
+    }
 }
 
 internal static class AppLog
