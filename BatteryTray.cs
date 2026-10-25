@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
@@ -18,32 +19,40 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        AppDomain.CurrentDomain.UnhandledException += delegate(object sender, UnhandledExceptionEventArgs e) {
+            AppLog.Write("fatal unhandled=" + e.ExceptionObject);
+        };
         try
         {
             if (Array.IndexOf(args, "--diagnose") >= 0)
             {
+                AppLog.Write("diagnose start");
                 BatterySnapshot snapshot = BatteryReader.Read(Hid.ReadMouse, Hid.ReadKeyboard,
                     delegate { Thread.Sleep(1500); }, delegate { return false; });
                 File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "diagnostic.txt"),
                     "Mouse=" + snapshot.Mouse + Environment.NewLine + "MouseSource=" + Hid.MouseSource +
                     Environment.NewLine + "Keyboard=" + snapshot.Keyboard, Encoding.UTF8);
+                AppLog.Write("diagnose result mouse=" + snapshot.Mouse + " keyboard=" + snapshot.Keyboard + " source=" + Hid.MouseSource);
                 return;
             }
             if (Array.IndexOf(args, "--install-startup") >= 0) SetStartup(true);
             bool created;
             using (Mutex mutex = new Mutex(true, @"Local\VxeKzziBattery.Native.v1", out created))
             {
-                if (!created) return;
+                if (!created) { AppLog.Write("startup skipped: another instance is running"); return; }
                 try
                 {
+                    AppLog.Write("app start path=" + Application.ExecutablePath + " autostart=" + (Array.IndexOf(args, "--autostart") >= 0));
                     Application.EnableVisualStyles();
                     Application.SetCompatibleTextRenderingDefault(false);
+                    Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
                     Application.Run(new BatteryContext());
                 }
-                finally { mutex.ReleaseMutex(); }
+                finally { AppLog.Write("app stopped"); mutex.ReleaseMutex(); }
             }
         }
         catch (Exception e) {
+            AppLog.Write("fatal main=" + e);
             try { File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "error.txt"), e.ToString(), Encoding.UTF8); } catch { }
             MessageBox.Show(e.Message, Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
@@ -61,6 +70,7 @@ internal static class Program
             if (enable) k.SetValue(RunName, StartupCommand());
             else k.DeleteValue(RunName, false);
         }
+        AppLog.Write("autostart enabled=" + enable);
     }
 }
 
@@ -86,9 +96,16 @@ internal sealed class BatteryContext : ApplicationContext
         mouseItem.Enabled = keyboardItem.Enabled = sourceItem.Enabled = false;
         menu.Items.Add(mouseItem); menu.Items.Add(keyboardItem);
         menu.Items.Add(sourceItem);
-        menu.Opening += delegate { Refresh(); };
+        menu.Opening += delegate { Refresh("menu-open"); };
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("立即刷新", null, delegate { Refresh(); });
+        menu.Items.Add("立即刷新", null, delegate { Refresh("manual"); });
+        menu.Items.Add("打开日志文件夹", null, delegate {
+            try {
+                Directory.CreateDirectory(AppLog.DirectoryPath);
+                Process.Start(new ProcessStartInfo { FileName = AppLog.DirectoryPath, UseShellExecute = true });
+            }
+            catch (Exception e) { AppLog.Write("open log folder failed=" + e); MessageBox.Show(e.Message, Program.Name); }
+        });
         startupItem.Checked = Program.StartupEnabled();
         startupItem.Click += delegate {
             try { Program.SetStartup(!Program.StartupEnabled()); startupItem.Checked = Program.StartupEnabled(); }
@@ -100,15 +117,15 @@ internal sealed class BatteryContext : ApplicationContext
         tray.ContextMenuStrip = menu;
         tray.Text = Program.Name + "：正在读取";
         PaintIcon();
-        tray.DoubleClick += delegate { Refresh(); };
+        tray.DoubleClick += delegate { Refresh("double-click"); };
         tray.Visible = true;
         timer.Interval = 60 * 1000;
-        timer.Tick += delegate { Refresh(); };
+        timer.Tick += delegate { Refresh("timer"); };
         timer.Start();
         resumeTimer.Interval = 3000;
-        resumeTimer.Tick += delegate { resumeTimer.Stop(); Refresh(); };
+        resumeTimer.Tick += delegate { resumeTimer.Stop(); Refresh("resume"); };
         SystemEvents.PowerModeChanged += OnPower;
-        Refresh();
+        Refresh("startup");
     }
     private void Post(Action action)
     {
@@ -117,20 +134,24 @@ internal sealed class BatteryContext : ApplicationContext
     }
     private void OnPower(object sender, PowerModeChangedEventArgs e)
     {
+        AppLog.Write("power mode=" + e.Mode);
         if (e.Mode == PowerModes.Resume) Post(delegate { resumeTimer.Stop(); resumeTimer.Start(); });
     }
-    private void Refresh()
+    private void Refresh(string reason)
     {
         if (closing || Interlocked.CompareExchange(ref busy, 1, 0) != 0) return;
         ThreadPool.QueueUserWorkItem(delegate {
+            Stopwatch watch = Stopwatch.StartNew();
+            AppLog.Write("refresh start reason=" + reason);
             int? m = null, k = null;
             try {
                 BatterySnapshot snapshot = BatteryReader.Read(Hid.ReadMouse, Hid.ReadKeyboard,
                     delegate { Thread.Sleep(1500); }, delegate { return closing; });
                 m = snapshot.Mouse; k = snapshot.Keyboard;
             }
-            catch { /* An unavailable device is shown as unknown, never as a cached percentage. */ }
+            catch (Exception e) { AppLog.Write("refresh error=" + e); }
             finally { Interlocked.Exchange(ref busy, 0); }
+            AppLog.Write("refresh result mouse=" + Format(m) + " keyboard=" + Format(k) + " source=" + Hid.MouseSource + " elapsed_ms=" + watch.ElapsedMilliseconds);
             Post(delegate {
                 mouse = m; keyboard = k;
                 mouseItem.Text = "鼠标 VXE R1SE+（左红）：" + Format(m);
@@ -138,6 +159,7 @@ internal sealed class BatteryContext : ApplicationContext
                 sourceItem.Text = "鼠标来源：" + Hid.MouseSource;
                 tray.Text = "鼠标(左红) " + Format(m) + " / 键盘(右蓝) " + Format(k);
                 PaintIcon();
+                AppLog.Write("display mouse=" + Format(m) + " keyboard=" + Format(k));
                 Low(m, 0, "鼠标 VXE R1SE+"); Low(k, 1, "键盘 珂芝 K75");
             });
         });
@@ -188,6 +210,7 @@ internal sealed class BatteryContext : ApplicationContext
     }
     protected override void ExitThreadCore()
     {
+        AppLog.Write("exit requested");
         closing = true;
         SystemEvents.PowerModeChanged -= OnPower;
         timer.Dispose(); resumeTimer.Dispose();
@@ -208,19 +231,21 @@ internal static class BatteryReader
 {
     internal static BatterySnapshot Read(Func<int?> mouse, Func<int?> keyboard, Action wait, Func<bool> stopping)
     {
-        BatterySnapshot result = new BatterySnapshot { Mouse = TryRead(mouse), Keyboard = TryRead(keyboard) };
+        BatterySnapshot result = new BatterySnapshot { Mouse = TryRead(mouse, "mouse"), Keyboard = TryRead(keyboard, "keyboard") };
         if ((result.Mouse.HasValue && result.Keyboard.HasValue) || stopping()) return result;
         // One delayed recovery pass; successful devices are not queried again.
+        AppLog.Write("retry scheduled delay_ms=1500 mouse=" + !result.Mouse.HasValue + " keyboard=" + !result.Keyboard.HasValue);
         wait();
         if (stopping()) return result;
-        if (!result.Mouse.HasValue) result.Mouse = TryRead(mouse);
-        if (!result.Keyboard.HasValue) result.Keyboard = TryRead(keyboard);
+        if (!result.Mouse.HasValue) result.Mouse = TryRead(mouse, "mouse retry");
+        if (!result.Keyboard.HasValue) result.Keyboard = TryRead(keyboard, "keyboard retry");
+        AppLog.Write("retry finished mouse=" + (result.Mouse.HasValue ? result.Mouse + "%" : "unknown") + " keyboard=" + (result.Keyboard.HasValue ? result.Keyboard + "%" : "unknown"));
         return result;
     }
-    private static int? TryRead(Func<int?> read)
+    private static int? TryRead(Func<int?> read, string name)
     {
         try { return read(); }
-        catch { return null; }
+        catch (Exception e) { AppLog.Write(name + " exception=" + e); return null; }
     }
 }
 
@@ -239,6 +264,7 @@ internal static class Hid
         // Never switch to a different device just because the receiver timed out.
         bool receiverPresent = candidates.Exists(delegate(Device d) { return d.Vid == 0x373b; });
         MouseSource = receiverPresent ? "无线接收器 373B:1085" : candidates.Count > 0 ? "VXE 3554:F58F" : "未连接";
+        AppLog.Write("mouse candidates=" + candidates.Count + " selected=" + MouseSource);
         foreach (Device d in candidates)
         {
             if (receiverPresent && d.Vid != 0x373b) continue;
@@ -246,13 +272,15 @@ internal static class Hid
             {
                 using (SafeFileHandle h = Open(d.Path, true))
                 {
-                    if (h.IsInvalid || d.Caps.OutputReportByteLength != 17 || d.Caps.InputReportByteLength < 17) continue;
+                    if (h.IsInvalid) { AppLog.Write("mouse open failed win32=" + Marshal.GetLastWin32Error()); continue; }
+                    if (d.Caps.OutputReportByteLength != 17 || d.Caps.InputReportByteLength < 17) { AppLog.Write("mouse unsupported report lengths"); continue; }
                     byte[] request = new byte[17]; request[0] = 8; request[1] = 4; request[16] = 73;
                     if (Transfer(h, request, false, 500) != request.Length) continue;
                     byte[] reply = new byte[d.Caps.InputReportByteLength];
                     int count = Transfer(h, reply, true, 700);
                     int sum = 0;
                     if (count == 17) for (int i = 0; i < 17; i++) sum += reply[i];
+                    AppLog.Write("mouse reply attempt=" + (attempt + 1) + " count=" + count + " checksum=" + (sum & 255).ToString("X2") + " bytes=" + (count > 0 ? BitConverter.ToString(reply, 0, count) : "none"));
                     if (count == 17 && reply[0] == 8 && reply[1] == 4 && reply[6] <= 100 && (sum & 255) == 0x55) return reply[6];
                 }
             }
@@ -266,11 +294,15 @@ internal static class Hid
             if (d.Vid != 0x3554 || d.Pid != 0xfa09 || d.Caps.UsagePage != 0xff04 || d.Caps.FeatureReportByteLength < 8) continue;
             using (SafeFileHandle h = Open(d.Path, false))
             {
-                if (h.IsInvalid) continue;
+                if (h.IsInvalid) { AppLog.Write("keyboard open failed win32=" + Marshal.GetLastWin32Error()); continue; }
                 byte[] reply = new byte[d.Caps.FeatureReportByteLength]; reply[0] = 6;
-                if (HidD_GetFeature(h, reply, reply.Length) && reply[0] == 6 && reply[3] <= 100) return reply[3];
+                bool ok = HidD_GetFeature(h, reply, reply.Length);
+                int error = ok ? 0 : Marshal.GetLastWin32Error();
+                AppLog.Write("keyboard feature ok=" + ok + " win32=" + error + " bytes=" + (ok ? BitConverter.ToString(reply) : "none"));
+                if (ok && reply[0] == 6 && reply[3] <= 100) return reply[3];
             }
         }
+        AppLog.Write("keyboard no valid reading");
         return null;
     }
     private static SafeFileHandle Open(string path, bool overlapped)
@@ -328,21 +360,24 @@ internal static class Hid
         IntPtr ev = CreateEvent(IntPtr.Zero, true, false, null);
         try
         {
-            if (ev == IntPtr.Zero) return -1;
+            if (ev == IntPtr.Zero) { AppLog.Write("io event creation failed"); return -1; }
             Marshal.Copy(bytes, 0, buffer, bytes.Length);
             Overlapped value = new Overlapped(); value.Event = ev;
             Marshal.StructureToPtr(value, ov, false);
             bool ok = read ? ReadFile(h, buffer, bytes.Length, IntPtr.Zero, ov) : WriteFile(h, buffer, bytes.Length, IntPtr.Zero, ov);
-            if (!ok && Marshal.GetLastWin32Error() != 997) return -1;
-            if (!ok && WaitForSingleObject(ev, timeout) != 0)
+            int error = ok ? 0 : Marshal.GetLastWin32Error();
+            if (!ok && error != 997) { AppLog.Write("io " + (read ? "read" : "write") + " failed win32=" + error); return -1; }
+            uint waitResult = ok ? 0 : WaitForSingleObject(ev, timeout);
+            if (!ok && waitResult != 0)
             {
+                AppLog.Write("io " + (read ? "read" : "write") + " wait=" + waitResult + " timeout_ms=" + timeout);
                 CancelIoEx(h, ov);
                 uint cancelled;
                 GetOverlappedResult(h, ov, out cancelled, true);
                 return -1;
             }
             uint count;
-            if (!GetOverlappedResult(h, ov, out count, true)) return -1;
+            if (!GetOverlappedResult(h, ov, out count, true)) { AppLog.Write("io completion failed win32=" + Marshal.GetLastWin32Error()); return -1; }
             if (read) Marshal.Copy(buffer, bytes, 0, (int)count);
             return (int)count;
         }
@@ -361,7 +396,7 @@ internal static class Hid
     [DllImport("hid.dll")] private static extern bool HidD_GetPreparsedData(SafeFileHandle h, out IntPtr data);
     [DllImport("hid.dll")] private static extern bool HidD_FreePreparsedData(IntPtr data);
     [DllImport("hid.dll")] private static extern int HidP_GetCaps(IntPtr data, out Caps caps);
-    [DllImport("hid.dll")] private static extern bool HidD_GetFeature(SafeFileHandle h, [In, Out] byte[] bytes, int size);
+    [DllImport("hid.dll", SetLastError = true)] private static extern bool HidD_GetFeature(SafeFileHandle h, [In, Out] byte[] bytes, int size);
     [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern IntPtr SetupDiGetClassDevs(ref Guid guid, string enumerator, IntPtr parent, uint flags);
     [DllImport("setupapi.dll", SetLastError = true)] private static extern bool SetupDiEnumDeviceInterfaces(IntPtr set, IntPtr device, ref Guid guid, uint index, ref Interface data);
     [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool SetupDiGetDeviceInterfaceDetail(IntPtr set, ref Interface data, IntPtr detail, uint size, out uint needed, IntPtr device);
@@ -374,4 +409,34 @@ internal static class Hid
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr CreateEvent(IntPtr security, bool manual, bool initial, string name);
     [DllImport("kernel32.dll")] private static extern uint WaitForSingleObject(IntPtr h, uint timeout);
     [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr h);
+}
+
+internal static class AppLog
+{
+    private static readonly object Gate = new object();
+    private static readonly int Pid = Process.GetCurrentProcess().Id;
+    internal static readonly string DirectoryPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "无线键鼠电量", "logs");
+    internal static void Write(string message) { WriteTo(DirectoryPath, message, 1024 * 1024); }
+    // At most three files: current + two backups. Logging errors never affect monitoring.
+    internal static void WriteTo(string directory, string message, int limit)
+    {
+        try {
+            lock (Gate) {
+                Directory.CreateDirectory(directory);
+                string file = Path.Combine(directory, "battery.log");
+                string line = DateTimeOffset.Now.ToString("yyyy-MM-dd HH:mm:ss.fff zzz") + " pid=" + Pid + " " +
+                    message.Replace("\r", "\\r").Replace("\n", "\\n") + Environment.NewLine;
+                Encoding encoding = new UTF8Encoding(false);
+                if (File.Exists(file) && new FileInfo(file).Length + encoding.GetByteCount(line) > limit) {
+                    string first = file + ".1", second = file + ".2";
+                    if (File.Exists(second)) File.Delete(second);
+                    if (File.Exists(first)) File.Move(first, second);
+                    File.Move(file, first);
+                }
+                File.AppendAllText(file, line, encoding);
+            }
+        }
+        catch { /* Disk full, access denied, or a concurrent diagnostic must not stop the app. */ }
+    }
 }

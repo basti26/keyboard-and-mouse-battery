@@ -3,3 +3,6 @@ error.txt
 *.pdb
 obj/
 bin/
+*.log
+*.log.1
+*.log.2
