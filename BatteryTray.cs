@@ -68,8 +68,8 @@ internal sealed class BatteryContext : ApplicationContext
     private readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
     private readonly System.Windows.Forms.Timer resumeTimer = new System.Windows.Forms.Timer();
     private readonly ContextMenuStrip menu = new ContextMenuStrip();
-    private readonly ToolStripMenuItem mouseItem = new ToolStripMenuItem("鼠标：正在读取…");
-    private readonly ToolStripMenuItem keyboardItem = new ToolStripMenuItem("键盘：正在读取…");
+    private readonly ToolStripMenuItem mouseItem = new ToolStripMenuItem("鼠标（左红）：正在读取…");
+    private readonly ToolStripMenuItem keyboardItem = new ToolStripMenuItem("键盘（右蓝）：正在读取…");
     private readonly ToolStripMenuItem startupItem = new ToolStripMenuItem("开机启动");
     private readonly bool[] warned = new bool[2];
     private Icon drawing;
@@ -101,7 +101,6 @@ internal sealed class BatteryContext : ApplicationContext
         timer.Start();
         resumeTimer.Interval = 3000;
         resumeTimer.Tick += delegate { resumeTimer.Stop(); Refresh(); };
-        SystemEvents.UserPreferenceChanged += OnTheme;
         SystemEvents.PowerModeChanged += OnPower;
         Refresh();
     }
@@ -110,7 +109,6 @@ internal sealed class BatteryContext : ApplicationContext
         if (closing) return;
         try { dispatcher.BeginInvoke(action); } catch (InvalidOperationException) { }
     }
-    private void OnTheme(object sender, UserPreferenceChangedEventArgs e) { Post(PaintIcon); }
     private void OnPower(object sender, PowerModeChangedEventArgs e)
     {
         if (e.Mode == PowerModes.Resume) Post(delegate { resumeTimer.Stop(); resumeTimer.Start(); });
@@ -125,9 +123,9 @@ internal sealed class BatteryContext : ApplicationContext
             finally { Interlocked.Exchange(ref busy, 0); }
             Post(delegate {
                 mouse = m; keyboard = k;
-                mouseItem.Text = "鼠标 VXE R1SE+：" + Format(m);
-                keyboardItem.Text = "键盘 珂芝 K75：" + Format(k);
-                tray.Text = "鼠标 " + Format(m) + " / 键盘 " + Format(k);
+                mouseItem.Text = "鼠标 VXE R1SE+（左红）：" + Format(m);
+                keyboardItem.Text = "键盘 珂芝 K75（右蓝）：" + Format(k);
+                tray.Text = "鼠标(左红) " + Format(m) + " / 键盘(右蓝) " + Format(k);
                 PaintIcon();
                 Low(m, 0, "鼠标 VXE R1SE+"); Low(k, 1, "键盘 珂芝 K75");
             });
@@ -142,21 +140,10 @@ internal sealed class BatteryContext : ApplicationContext
         warned[index] = true;
         tray.ShowBalloonTip(8000, Program.Name, name + " 电量仅剩 " + value + "%", ToolTipIcon.Warning);
     }
-    private static Color Foreground()
-    {
-        using (RegistryKey k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"))
-            return k != null && Convert.ToInt32(k.GetValue("SystemUsesLightTheme", 0)) != 0 ? Color.FromArgb(32, 32, 32) : Color.White;
-    }
     private void PaintIcon()
     {
-        Color fg;
-        try { fg = Foreground(); } catch { fg = Color.White; }
-        using (Bitmap bitmap = new Bitmap(64, 64))
-        using (Graphics g = Graphics.FromImage(bitmap))
+        using (Bitmap bitmap = BuildBitmap(mouse, keyboard))
         {
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            Ring(g, new RectangleF(5, 5, 54, 54), 5, mouse, fg);
-            Ring(g, new RectangleF(21, 21, 22, 22), 4, keyboard, fg);
             IntPtr h = bitmap.GetHicon();
             Icon next;
             try { using (Icon borrowed = Icon.FromHandle(h)) next = (Icon)borrowed.Clone(); }
@@ -166,24 +153,32 @@ internal sealed class BatteryContext : ApplicationContext
             if (old != null) old.Dispose();
         }
     }
-    private static void Ring(Graphics g, RectangleF bounds, float width, int? value, Color fg)
+    internal static Bitmap BuildBitmap(int? mouse, int? keyboard)
     {
-        using (Pen track = new Pen(Color.FromArgb(60, fg), width)) g.DrawEllipse(track, bounds);
-        if (!value.HasValue) {
-            using (Pen unknown = new Pen(Color.FromArgb(150, fg), width)) g.DrawArc(unknown, bounds, -90, 22);
-            return;
+        Bitmap bitmap = new Bitmap(64, 64);
+        using (Graphics g = Graphics.FromImage(bitmap))
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            // Mirrored halves start at the top; small gaps keep the devices distinct.
+            HalfRing(g, mouse, Color.FromArgb(244, 75, 86), -94, -172);
+            HalfRing(g, keyboard, Color.FromArgb(48, 154, 255), -86, 172);
         }
-        Color color = value <= 15 ? Color.FromArgb(255, 80, 80) : value <= 30 ? Color.FromArgb(255, 196, 66) : fg;
-        using (Pen p = new Pen(color, width)) {
-            if (value == 0) g.DrawArc(p, bounds, -90, 5);
-            else if (value == 100) g.DrawEllipse(p, bounds);
-            else g.DrawArc(p, bounds, -90, value.Value * 3.6f);
+        return bitmap;
+    }
+    private static void HalfRing(Graphics g, int? value, Color color, float start, float sweep)
+    {
+        RectangleF bounds = new RectangleF(8, 8, 48, 48);
+        using (Pen track = new Pen(Color.FromArgb(72, color), 9)) g.DrawArc(track, bounds, start, sweep);
+        if (!value.HasValue) return;
+        int percent = Math.Max(0, Math.Min(100, value.Value));
+        if (percent > 0) using (Pen arc = new Pen(color, 9)) {
+            g.DrawArc(arc, bounds, start, sweep * percent / 100f);
         }
     }
     protected override void ExitThreadCore()
     {
         closing = true;
-        SystemEvents.UserPreferenceChanged -= OnTheme; SystemEvents.PowerModeChanged -= OnPower;
+        SystemEvents.PowerModeChanged -= OnPower;
         timer.Dispose(); resumeTimer.Dispose();
         tray.Visible = false; tray.Dispose(); menu.Dispose();
         if (drawing != null) drawing.Dispose();
