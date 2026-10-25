@@ -22,9 +22,11 @@ internal static class Program
         {
             if (Array.IndexOf(args, "--diagnose") >= 0)
             {
+                BatterySnapshot snapshot = BatteryReader.Read(Hid.ReadMouse, Hid.ReadKeyboard,
+                    delegate { Thread.Sleep(1500); }, delegate { return false; });
                 File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "diagnostic.txt"),
-                    "Mouse=" + Hid.ReadMouse() + Environment.NewLine + "MouseSource=" + Hid.MouseSource +
-                    Environment.NewLine + "Keyboard=" + Hid.ReadKeyboard(), Encoding.UTF8);
+                    "Mouse=" + snapshot.Mouse + Environment.NewLine + "MouseSource=" + Hid.MouseSource +
+                    Environment.NewLine + "Keyboard=" + snapshot.Keyboard, Encoding.UTF8);
                 return;
             }
             if (Array.IndexOf(args, "--install-startup") >= 0) SetStartup(true);
@@ -122,7 +124,11 @@ internal sealed class BatteryContext : ApplicationContext
         if (closing || Interlocked.CompareExchange(ref busy, 1, 0) != 0) return;
         ThreadPool.QueueUserWorkItem(delegate {
             int? m = null, k = null;
-            try { m = Hid.ReadMouse(); k = Hid.ReadKeyboard(); }
+            try {
+                BatterySnapshot snapshot = BatteryReader.Read(Hid.ReadMouse, Hid.ReadKeyboard,
+                    delegate { Thread.Sleep(1500); }, delegate { return closing; });
+                m = snapshot.Mouse; k = snapshot.Keyboard;
+            }
             catch { /* An unavailable device is shown as unknown, never as a cached percentage. */ }
             finally { Interlocked.Exchange(ref busy, 0); }
             Post(delegate {
@@ -191,6 +197,31 @@ internal sealed class BatteryContext : ApplicationContext
         base.ExitThreadCore();
     }
     [DllImport("user32.dll")] private static extern bool DestroyIcon(IntPtr icon);
+}
+
+internal struct BatterySnapshot
+{
+    internal int? Mouse, Keyboard;
+}
+
+internal static class BatteryReader
+{
+    internal static BatterySnapshot Read(Func<int?> mouse, Func<int?> keyboard, Action wait, Func<bool> stopping)
+    {
+        BatterySnapshot result = new BatterySnapshot { Mouse = TryRead(mouse), Keyboard = TryRead(keyboard) };
+        if ((result.Mouse.HasValue && result.Keyboard.HasValue) || stopping()) return result;
+        // One delayed recovery pass; successful devices are not queried again.
+        wait();
+        if (stopping()) return result;
+        if (!result.Mouse.HasValue) result.Mouse = TryRead(mouse);
+        if (!result.Keyboard.HasValue) result.Keyboard = TryRead(keyboard);
+        return result;
+    }
+    private static int? TryRead(Func<int?> read)
+    {
+        try { return read(); }
+        catch { return null; }
+    }
 }
 
 internal static class Hid
