@@ -23,7 +23,8 @@ internal static class Program
             if (Array.IndexOf(args, "--diagnose") >= 0)
             {
                 File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "diagnostic.txt"),
-                    "Mouse=" + Hid.ReadMouse() + Environment.NewLine + "Keyboard=" + Hid.ReadKeyboard(), Encoding.UTF8);
+                    "Mouse=" + Hid.ReadMouse() + Environment.NewLine + "MouseSource=" + Hid.MouseSource +
+                    Environment.NewLine + "Keyboard=" + Hid.ReadKeyboard(), Encoding.UTF8);
                 return;
             }
             if (Array.IndexOf(args, "--install-startup") >= 0) SetStartup(true);
@@ -70,6 +71,7 @@ internal sealed class BatteryContext : ApplicationContext
     private readonly ContextMenuStrip menu = new ContextMenuStrip();
     private readonly ToolStripMenuItem mouseItem = new ToolStripMenuItem("鼠标（左红）：正在读取…");
     private readonly ToolStripMenuItem keyboardItem = new ToolStripMenuItem("键盘（右蓝）：正在读取…");
+    private readonly ToolStripMenuItem sourceItem = new ToolStripMenuItem("鼠标来源：正在读取…");
     private readonly ToolStripMenuItem startupItem = new ToolStripMenuItem("开机启动");
     private readonly bool[] warned = new bool[2];
     private Icon drawing;
@@ -79,8 +81,10 @@ internal sealed class BatteryContext : ApplicationContext
     internal BatteryContext()
     {
         IntPtr handle = dispatcher.Handle;
-        mouseItem.Enabled = keyboardItem.Enabled = false;
+        mouseItem.Enabled = keyboardItem.Enabled = sourceItem.Enabled = false;
         menu.Items.Add(mouseItem); menu.Items.Add(keyboardItem);
+        menu.Items.Add(sourceItem);
+        menu.Opening += delegate { Refresh(); };
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("立即刷新", null, delegate { Refresh(); });
         startupItem.Checked = Program.StartupEnabled();
@@ -125,6 +129,7 @@ internal sealed class BatteryContext : ApplicationContext
                 mouse = m; keyboard = k;
                 mouseItem.Text = "鼠标 VXE R1SE+（左红）：" + Format(m);
                 keyboardItem.Text = "键盘 珂芝 K75（右蓝）：" + Format(k);
+                sourceItem.Text = "鼠标来源：" + Hid.MouseSource;
                 tray.Text = "鼠标(左红) " + Format(m) + " / 键盘(右蓝) " + Format(k);
                 PaintIcon();
                 Low(m, 0, "鼠标 VXE R1SE+"); Low(k, 1, "键盘 珂芝 K75");
@@ -191,18 +196,34 @@ internal sealed class BatteryContext : ApplicationContext
 internal static class Hid
 {
     private sealed class Device { internal string Path; internal ushort Vid, Pid; internal Caps Caps; }
+    internal static string MouseSource = "未连接";
     internal static int? ReadMouse()
     {
+        List<Device> candidates = new List<Device>();
         foreach (Device d in Enumerate())
         {
-            if (d.Caps.UsagePage != 0xff02 || !((d.Vid == 0x373b && d.Pid == 0x1085) || (d.Vid == 0x3554 && d.Pid == 0xf58f))) continue;
-            using (SafeFileHandle h = Open(d.Path, true))
+            if (d.Caps.UsagePage == 0xff02 && d.Caps.Usage == 2 &&
+                ((d.Vid == 0x373b && d.Pid == 0x1085) || (d.Vid == 0x3554 && d.Pid == 0xf58f))) candidates.Add(d);
+        }
+        // Never switch to a different device just because the receiver timed out.
+        bool receiverPresent = candidates.Exists(delegate(Device d) { return d.Vid == 0x373b; });
+        MouseSource = receiverPresent ? "无线接收器 373B:1085" : candidates.Count > 0 ? "VXE 3554:F58F" : "未连接";
+        foreach (Device d in candidates)
+        {
+            if (receiverPresent && d.Vid != 0x373b) continue;
+            for (int attempt = 0; attempt < 2; attempt++)
             {
-                if (h.IsInvalid || d.Caps.OutputReportByteLength != 17 || d.Caps.InputReportByteLength < 17) continue;
-                byte[] request = new byte[17]; request[0] = 8; request[1] = 4; request[16] = 73;
-                if (Transfer(h, request, false, 500) != request.Length) continue;
-                byte[] reply = new byte[d.Caps.InputReportByteLength];
-                if (Transfer(h, reply, true, 700) >= 7 && reply[0] == 8 && reply[1] == 4 && reply[6] <= 100) return reply[6];
+                using (SafeFileHandle h = Open(d.Path, true))
+                {
+                    if (h.IsInvalid || d.Caps.OutputReportByteLength != 17 || d.Caps.InputReportByteLength < 17) continue;
+                    byte[] request = new byte[17]; request[0] = 8; request[1] = 4; request[16] = 73;
+                    if (Transfer(h, request, false, 500) != request.Length) continue;
+                    byte[] reply = new byte[d.Caps.InputReportByteLength];
+                    int count = Transfer(h, reply, true, 700);
+                    int sum = 0;
+                    if (count == 17) for (int i = 0; i < 17; i++) sum += reply[i];
+                    if (count == 17 && reply[0] == 8 && reply[1] == 4 && reply[6] <= 100 && (sum & 255) == 0x55) return reply[6];
+                }
             }
         }
         return null;
