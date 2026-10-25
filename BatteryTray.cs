@@ -100,7 +100,7 @@ internal sealed class BatteryContext : ApplicationContext
         PaintIcon();
         tray.DoubleClick += delegate { Refresh(); };
         tray.Visible = true;
-        timer.Interval = 30 * 60 * 1000;
+        timer.Interval = 60 * 1000;
         timer.Tick += delegate { Refresh(); };
         timer.Start();
         resumeTimer.Interval = 3000;
