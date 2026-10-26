@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -16,6 +17,7 @@ internal static class Program
     internal const string Name = "无线键鼠电量";
     internal const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     internal const string RunName = "VxeKzziBattery";
+    internal static string StartupLink { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Startup), "无线键鼠电量.lnk"); } }
     [STAThread]
     private static void Main(string[] args)
     {
@@ -59,18 +61,40 @@ internal static class Program
     }
     internal static bool StartupEnabled()
     {
+        if (File.Exists(StartupLink)) return true;
         using (RegistryKey k = Registry.CurrentUser.OpenSubKey(RunKey))
             return k != null && String.Equals(k.GetValue(RunName) as string, StartupCommand(), StringComparison.OrdinalIgnoreCase);
     }
     private static string StartupCommand() { return "\"" + Application.ExecutablePath + "\" --autostart"; }
     internal static void SetStartup(bool enable)
     {
+        if (enable) {
+            Directory.CreateDirectory(Path.GetDirectoryName(StartupLink));
+            object shell = null, shortcut = null;
+            try {
+                Type shellType = Type.GetTypeFromProgID("WScript.Shell", true);
+                shell = Activator.CreateInstance(shellType);
+                shortcut = shellType.InvokeMember("CreateShortcut", BindingFlags.InvokeMethod, null, shell, new object[] { StartupLink });
+                Type type = shortcut.GetType();
+                type.InvokeMember("TargetPath", BindingFlags.SetProperty, null, shortcut, new object[] { Application.ExecutablePath });
+                type.InvokeMember("Arguments", BindingFlags.SetProperty, null, shortcut, new object[] { "--autostart" });
+                type.InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, shortcut, new object[] { AppDomain.CurrentDomain.BaseDirectory });
+                type.InvokeMember("Description", BindingFlags.SetProperty, null, shortcut, new object[] { Program.Name });
+                type.InvokeMember("Save", BindingFlags.InvokeMethod, null, shortcut, null);
+            }
+            finally {
+                if (shortcut != null) Marshal.FinalReleaseComObject(shortcut);
+                if (shell != null) Marshal.FinalReleaseComObject(shell);
+            }
+            if (!File.Exists(StartupLink)) throw new IOException("未能创建启动快捷方式");
+        }
+        else if (File.Exists(StartupLink)) File.Delete(StartupLink);
+        // Migrate the legacy Run entry so there is only one startup registration.
         using (RegistryKey k = Registry.CurrentUser.CreateSubKey(RunKey))
         {
-            if (enable) k.SetValue(RunName, StartupCommand());
-            else k.DeleteValue(RunName, false);
+            k.DeleteValue(RunName, false);
         }
-        AppLog.Write("autostart enabled=" + enable);
+        AppLog.Write("autostart enabled=" + enable + " method=startup-shortcut path=" + StartupLink);
     }
 }
 
