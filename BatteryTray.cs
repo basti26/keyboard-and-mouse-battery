@@ -109,7 +109,6 @@ internal sealed class BatteryContext : ApplicationContext
     private readonly ContextMenuStrip menu = new ContextMenuStrip();
     private readonly ToolStripMenuItem mouseItem = new ToolStripMenuItem("鼠标（左红）：正在读取…");
     private readonly ToolStripMenuItem keyboardItem = new ToolStripMenuItem("键盘（右蓝）：正在读取…");
-    private readonly ToolStripMenuItem sourceItem = new ToolStripMenuItem("鼠标来源：正在读取…");
     private readonly ToolStripMenuItem startupItem = new ToolStripMenuItem("开机启动");
     private readonly bool[] warned = new bool[2];
     private readonly BatteryHistory mouseHistory = new BatteryHistory();
@@ -120,19 +119,11 @@ internal sealed class BatteryContext : ApplicationContext
     internal BatteryContext()
     {
         IntPtr handle = dispatcher.Handle;
-        mouseItem.Enabled = keyboardItem.Enabled = sourceItem.Enabled = false;
+        mouseItem.Enabled = keyboardItem.Enabled = false;
         menu.Items.Add(mouseItem); menu.Items.Add(keyboardItem);
-        menu.Items.Add(sourceItem);
         menu.Opening += delegate { Refresh("menu-open"); };
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("立即刷新", null, delegate { Refresh("manual"); });
-        menu.Items.Add("打开日志文件夹", null, delegate {
-            try {
-                Directory.CreateDirectory(AppLog.DirectoryPath);
-                Process.Start(new ProcessStartInfo { FileName = AppLog.DirectoryPath, UseShellExecute = true });
-            }
-            catch (Exception e) { AppLog.Write("open log folder failed=" + e); MessageBox.Show(e.Message, Program.Name); }
-        });
         startupItem.Checked = Program.StartupEnabled();
         startupItem.Click += delegate {
             try { Program.SetStartup(!Program.StartupEnabled()); startupItem.Checked = Program.StartupEnabled(); }
@@ -196,8 +187,6 @@ internal sealed class BatteryContext : ApplicationContext
                 mouseItem.Text = "鼠标 VXE R1SE+（左红）：" + Format(mouse);
                 if (mouseHistory.IsStale) mouseItem.Text += "（上次读取 " + mouseHistory.UpdatedAt.Value.ToString("MM-dd HH:mm:ss") + "）";
                 keyboardItem.Text = "键盘 珂芝 K75（右蓝）：" + Format(k);
-                sourceItem.Text = "鼠标来源：" + Hid.MouseSource;
-                if (!m.HasValue) sourceItem.Text += "（" + Hid.MouseLinkStatus + "）";
                 tray.Text = "鼠标(左红) " + Format(mouse) + (mouseHistory.IsStale ? "（上次 " + mouseHistory.UpdatedAt.Value.ToString("HH:mm") + "）" : "") + " / 键盘(右蓝) " + Format(k);
                 PaintIcon();
                 AppLog.Write("display mouse=" + Format(mouse) + " cached=" + mouseHistory.IsStale + " last_success=" + mouseHistory.UpdatedAt + " keyboard=" + Format(k));
